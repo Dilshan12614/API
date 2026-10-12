@@ -1,0 +1,131 @@
+name: THENUVA X MD Video API
+
+on:
+  push:
+    branches:
+      - main
+
+  pull_request:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: thenuva-video-api-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build and Test Video API
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      # 1. CHECKOUT
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. NODE.JS
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # 3. INSTALL FFMPEG
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+          echo "Checking FFmpeg..."
+          ffmpeg -version | head -n 1
+
+          echo "Checking FFprobe..."
+          ffprobe -version | head -n 1
+
+      # 4. VERIFY PROJECT FILES
+      - name: Verify project files
+        run: |
+          test -f package.json
+          test -f src/server.js
+
+          echo "Project files found."
+
+      # 5. INSTALL DEPENDENCIES
+      - name: Install Node.js dependencies
+        run: npm install --no-audit --no-fund
+
+      # 6. CHECK JAVASCRIPT SYNTAX
+      - name: Check JavaScript syntax
+        run: |
+          node --check src/server.js
+          echo "JavaScript syntax check passed."
+
+      # 7. CHECK SERVER STARTUP AND HEALTH
+      - name: Start API and test health endpoint
+        env:
+          PORT: 8080
+          API_KEY: ${{ secrets.VIDEO_API_TEST_KEY }}
+          MAX_UPLOAD_MB: 100
+          MAX_OUTPUT_MB: 100
+        run: |
+          set -eu
+
+          if [ -z "$API_KEY" ]; then
+            echo "VIDEO_API_TEST_KEY is not configured."
+            echo "Add it in Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+
+          node src/server.js > server.log 2>&1 &
+          SERVER_PID=$!
+
+          cleanup() {
+            kill "$SERVER_PID" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          READY=0
+
+          for i in $(seq 1 30); do
+            if curl --fail --silent \
+              http://127.0.0.1:8080/api/health \
+              -o health.json; then
+              READY=1
+              break
+            fi
+
+            if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+              echo "API server stopped unexpectedly."
+              cat server.log
+              exit 1
+            fi
+
+            sleep 2
+          done
+
+          if [ "$READY" -ne 1 ]; then
+            echo "API health check failed."
+            cat server.log
+            exit 1
+          fi
+
+          echo "API health check response:"
+          cat health.json
+          echo
+
+          grep -q '"success":true' health.json
+
+          echo "THENUVA Video API startup test passed."
+
+      # 8. SUMMARY
+      - name: Build summary
+        if: success()
+        run: |
+          echo "THENUVA X MD Video API checks passed."
+          echo "Node.js and FFmpeg are available."
+          echo "API startup and health check succeeded."
